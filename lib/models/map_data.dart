@@ -182,6 +182,13 @@ BuiltMap buildNachtDerUntoten() {
 
       if (grid[y][x] == 1) {
         walls.add(MapRect(px, py, tileSize, tileSize));
+      } else if (grid[y][x] == 3) {
+        // Windows are walls too (player can't walk through)
+        walls.add(MapRect(px, py, tileSize, tileSize));
+        zombieSpawns.add(SpawnPoint(
+          x: px, y: py,
+          room: _getRoom(x, y),
+        ));
       } else if (grid[y][x] == 2) {
         String doorId;
         int cost;
@@ -201,11 +208,6 @@ BuiltMap buildNachtDerUntoten() {
         doors.add(DoorState(
           x: px, y: py, w: tileSize, h: tileSize,
           id: doorId, cost: cost,
-        ));
-      } else if (grid[y][x] == 3) {
-        zombieSpawns.add(SpawnPoint(
-          x: px, y: py,
-          room: _getRoom(x, y),
         ));
       }
     }

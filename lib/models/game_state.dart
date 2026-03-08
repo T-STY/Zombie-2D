@@ -176,6 +176,10 @@ class ZombieState {
   final double width = 24;
   final double height = 24;
 
+  // Barricade system
+  BarricadeState? targetBarricade;
+  bool insideMap = false; // false = still outside window, attacking barricade
+
   ZombieState({
     required this.x,
     required this.y,
@@ -405,8 +409,41 @@ class PerkState {
 class SpawnPoint {
   final double x, y;
   final String room;
+  late final BarricadeState barricade;
 
-  SpawnPoint({required this.x, required this.y, required this.room});
+  SpawnPoint({required this.x, required this.y, required this.room})
+      : barricade = BarricadeState();
+}
+
+class BarricadeState {
+  int planks;
+  final int maxPlanks;
+  double plankHealth;
+  final double maxPlankHealth;
+
+  BarricadeState({
+    this.planks = 4,
+    this.maxPlanks = 4,
+    this.maxPlankHealth = 50.0,
+  }) : plankHealth = 50.0;
+
+  bool get intact => planks > 0;
+
+  void hitPlank(double damage) {
+    if (planks <= 0) return;
+    plankHealth -= damage;
+    if (plankHealth <= 0) {
+      planks--;
+      plankHealth = maxPlankHealth;
+    }
+  }
+
+  bool addPlank() {
+    if (planks >= maxPlanks) return false;
+    planks++;
+    plankHealth = maxPlankHealth;
+    return true;
+  }
 }
 
 class MysteryBoxState {

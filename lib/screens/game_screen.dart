@@ -54,12 +54,12 @@ class _GameScreenState extends State<GameScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          MouseRegion(
-            onHover: (event) {
-              _game.updateMousePosition(
-                event.localPosition.dx,
-                event.localPosition.dy,
-              );
+          Listener(
+            onPointerHover: (event) {
+              _game.updateMouseDelta(event.delta.dx);
+            },
+            onPointerMove: (event) {
+              _game.updateMouseDelta(event.delta.dx);
             },
             child: GameWidget(game: _game),
           ),
