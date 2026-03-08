@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import '../models/game_state.dart';
 import '../models/map_data.dart';
 import '../models/weapon_data.dart';
-import 'raycaster.dart';
 
 class ZombieGame extends FlameGame with KeyboardEvents {
   final String mapKey;
@@ -22,20 +21,15 @@ class ZombieGame extends FlameGame with KeyboardEvents {
   late RoundState _round;
   final Set<String> _openedDoors = {};
 
-  // Raycaster
-  final Raycaster _raycaster = Raycaster();
-
   // Input
   final Set<LogicalKeyboardKey> _keysPressed = {};
+  double _mouseX = 0, _mouseY = 0;
   bool _firing = false;
   bool _mobileFiring = false;
   double _mobileMoveDx = 0, _mobileMoveDy = 0;
-  double _mouseSensitivity = 0.0045;
 
-  // Movement feel
-  double _velocityX = 0, _velocityY = 0;
-  static const double _acceleration = 12.0;
-  static const double _friction = 8.0;
+  // Camera
+  double _camX = 0, _camY = 0;
 
   // Screen shake
   double _shakeX = 0, _shakeY = 0;
@@ -49,13 +43,6 @@ class ZombieGame extends FlameGame with KeyboardEvents {
   // Compliment system
   int _killStreak = 0;
   double _killStreakTimer = 0;
-
-  // Weapon view
-  double _weaponBob = 0;
-  double _muzzleFlashTimer = 0;
-
-  // Interaction prompt
-  String? _interactionPrompt;
 
   // Round compliments
   final List<String> _roundCompliments = [
@@ -114,6 +101,10 @@ class ZombieGame extends FlameGame with KeyboardEvents {
     _mobileFiring = firing;
   }
 
+  void setFiring(bool firing) {
+    _firing = firing;
+  }
+
   void onReloadPressed() {
     _player.currentWeapon.startReload();
   }
@@ -130,16 +121,9 @@ class ZombieGame extends FlameGame with KeyboardEvents {
     _tryKnife();
   }
 
-  void setFiring(bool firing) {
-    _firing = firing;
-  }
-
-  void updateMouseDelta(double dx) {
-    if (!_player.alive) return;
-    _player.angle += dx * _mouseSensitivity;
-    // Keep angle in range
-    while (_player.angle > pi) _player.angle -= 2 * pi;
-    while (_player.angle < -pi) _player.angle += 2 * pi;
+  void updateMousePosition(double x, double y) {
+    _mouseX = x;
+    _mouseY = y;
   }
 
   // ---- Input Handling ----
@@ -182,9 +166,7 @@ class ZombieGame extends FlameGame with KeyboardEvents {
   // Walls that block zombies (exclude windows with broken barricades)
   List<MapRect> _getZombieWalls() {
     final walls = <MapRect>[];
-    // Add regular walls
     for (final wall in _map.walls) {
-      // Check if this wall is actually a window spawn point
       bool isWindow = false;
       for (final spawn in _map.zombieSpawns) {
         if (spawn.x == wall.x && spawn.y == wall.y) {
@@ -195,8 +177,6 @@ class ZombieGame extends FlameGame with KeyboardEvents {
       if (!isWindow) {
         walls.add(wall);
       }
-      // Windows only block zombies if barricade is intact
-      // (zombies pass through if barricade is broken)
     }
     for (final door in _map.doors) {
       if (!door.open) {
@@ -328,8 +308,8 @@ class ZombieGame extends FlameGame with KeyboardEvents {
     // Try mystery box
     final mb = _map.mysteryBox;
     if (mb != null) {
-      if (mb.requiresDoor != null && !_openedDoors.contains(mb.requiresDoor)) {}
-      else {
+      if (mb.requiresDoor != null && !_openedDoors.contains(mb.requiresDoor)) {
+      } else {
         final dist = _dist(px, py, mb.x + 20, mb.y + 15);
         if (dist < 80) {
           if (mb.active) {
@@ -360,8 +340,8 @@ class ZombieGame extends FlameGame with KeyboardEvents {
     // Try Pack-a-Punch
     final pap = _map.packAPunch;
     if (pap != null) {
-      if (pap.requiresDoor != null && !_openedDoors.contains(pap.requiresDoor)) {}
-      else {
+      if (pap.requiresDoor != null && !_openedDoors.contains(pap.requiresDoor)) {
+      } else {
         final dist = _dist(px, py, pap.x + 20, pap.y + 15);
         if (dist < 80) {
           if (pap.active) return;
@@ -412,6 +392,8 @@ class ZombieGame extends FlameGame with KeyboardEvents {
     _killStreak++;
     _killStreakTimer = 3.0;
 
+    _spawnFloatingText(zombie.x, zombie.y - 10, '+${zombie.pointsOnKill * multiplier}',
+        0xFFFFD700, size: 14);
     _spawnParticles(zombie.x + zombie.width / 2, zombie.y + zombie.height / 2,
         0xFF8B0000, 8, 3, life: 0.5);
 
@@ -474,7 +456,7 @@ class ZombieGame extends FlameGame with KeyboardEvents {
     _updateMysteryBox(dt);
     _updatePackAPunch(dt);
     _updateEffects(dt);
-    _updateInteractionPrompt();
+    _updateCamera();
   }
 
   void _updateRound(double dt) {
@@ -524,7 +506,6 @@ class ZombieGame extends FlameGame with KeyboardEvents {
       y: spawn.y,
       round: _round.currentRound,
     );
-    // Assign barricade target if barricade intact
     if (spawn.barricade.intact) {
       z.targetBarricade = spawn.barricade;
       z.insideMap = false;
@@ -535,42 +516,50 @@ class ZombieGame extends FlameGame with KeyboardEvents {
   }
 
   void _updatePlayer(double dt) {
-    // FPS-style movement: forward/back/strafe relative to facing angle
-    double inputForward = 0, inputStrafe = 0;
-    if (_keysPressed.contains(LogicalKeyboardKey.keyW) ||
-        _keysPressed.contains(LogicalKeyboardKey.arrowUp)) {
-      inputForward += 1;
-    }
-    if (_keysPressed.contains(LogicalKeyboardKey.keyS) ||
-        _keysPressed.contains(LogicalKeyboardKey.arrowDown)) {
-      inputForward -= 1;
-    }
+    // Movement from keyboard
+    double mx = 0, my = 0;
     if (_keysPressed.contains(LogicalKeyboardKey.keyA) ||
         _keysPressed.contains(LogicalKeyboardKey.arrowLeft)) {
-      inputStrafe -= 1;
+      mx -= 1;
     }
     if (_keysPressed.contains(LogicalKeyboardKey.keyD) ||
         _keysPressed.contains(LogicalKeyboardKey.arrowRight)) {
-      inputStrafe += 1;
+      mx += 1;
+    }
+    if (_keysPressed.contains(LogicalKeyboardKey.keyW) ||
+        _keysPressed.contains(LogicalKeyboardKey.arrowUp)) {
+      my -= 1;
+    }
+    if (_keysPressed.contains(LogicalKeyboardKey.keyS) ||
+        _keysPressed.contains(LogicalKeyboardKey.arrowDown)) {
+      my += 1;
     }
 
-    // Mobile input: joystick Y = forward/back, joystick X = strafe
+    // Add mobile input
     if (_mobileMoveDx != 0 || _mobileMoveDy != 0) {
-      inputForward = -_mobileMoveDy;
-      inputStrafe = _mobileMoveDx;
+      mx = _mobileMoveDx;
+      my = _mobileMoveDy;
     }
 
     // Normalize diagonal
-    if (inputForward != 0 && inputStrafe != 0) {
-      final len = sqrt(inputForward * inputForward + inputStrafe * inputStrafe);
-      inputForward /= len;
-      inputStrafe /= len;
+    if (mx != 0 && my != 0) {
+      final len = sqrt(mx * mx + my * my);
+      mx /= len;
+      my /= len;
     }
 
-    // Convert input to world-space target velocity
-    final targetMoveX = cos(_player.angle) * inputForward + cos(_player.angle + pi / 2) * inputStrafe;
-    final targetMoveY = sin(_player.angle) * inputForward + sin(_player.angle + pi / 2) * inputStrafe;
+    _player.moveX = mx;
+    _player.moveY = my;
 
+    // Aim toward mouse
+    final worldMouseX = _mouseX + _camX;
+    final worldMouseY = _mouseY + _camY;
+    _player.angle = atan2(
+      worldMouseY - (_player.y + _player.height / 2),
+      worldMouseX - (_player.x + _player.width / 2),
+    );
+
+    // Movement
     double spd = _player.speed;
     if (_player.perks.contains('staminup')) spd *= 1.3;
     if (_player.currentWeapon.reloading) spd *= 0.7;
@@ -578,26 +567,8 @@ class ZombieGame extends FlameGame with KeyboardEvents {
       _player.currentWeapon.reloadTimer -= dt * 0.5;
     }
 
-    final targetVX = targetMoveX * spd;
-    final targetVY = targetMoveY * spd;
-
-    // Smooth acceleration/deceleration (momentum)
-    final hasInput = inputForward != 0 || inputStrafe != 0;
-    final lerpRate = hasInput ? _acceleration : _friction;
-    _velocityX += (targetVX - _velocityX) * min(1.0, lerpRate * dt);
-    _velocityY += (targetVY - _velocityY) * min(1.0, lerpRate * dt);
-
-    // Kill very small velocities to avoid drifting
-    if (_velocityX.abs() < 0.01 && _velocityY.abs() < 0.01) {
-      _velocityX = 0;
-      _velocityY = 0;
-    }
-
-    _player.moveX = _velocityX / max(spd, 0.01);
-    _player.moveY = _velocityY / max(spd, 0.01);
-
-    double newX = _player.x + _velocityX * dt * 60;
-    double newY = _player.y + _velocityY * dt * 60;
+    double newX = _player.x + _player.moveX * spd * dt * 60;
+    double newY = _player.y + _player.moveY * spd * dt * 60;
 
     final walls = _getActiveWalls();
     bool blockedX = false, blockedY = false;
@@ -611,16 +582,8 @@ class ZombieGame extends FlameGame with KeyboardEvents {
         blockedY = true;
       }
     }
-    if (!blockedX) {
-      _player.x = newX;
-    } else {
-      _velocityX = 0; // Stop momentum on wall hit
-    }
-    if (!blockedY) {
-      _player.y = newY;
-    } else {
-      _velocityY = 0;
-    }
+    if (!blockedX) _player.x = newX;
+    if (!blockedY) _player.y = newY;
 
     _player.currentWeapon.update(dt);
     if (_player.knifeTimer > 0) _player.knifeTimer -= dt;
@@ -637,19 +600,7 @@ class ZombieGame extends FlameGame with KeyboardEvents {
       _player.damageOverlayAlpha -= dt * 0.5;
     }
 
-    // Weapon bob when moving - tied to actual velocity for realism
-    final moveSpeed = sqrt(_velocityX * _velocityX + _velocityY * _velocityY);
-    if (moveSpeed > 0.3) {
-      _weaponBob += dt * moveSpeed * 2.5;
-    } else {
-      // Gentle idle sway
-      _weaponBob += dt * 0.5;
-    }
-
-    // Muzzle flash decay
-    if (_muzzleFlashTimer > 0) _muzzleFlashTimer -= dt;
-
-    // Firing - shoots along player angle (center of screen)
+    // Firing
     final shouldFire = _firing || _mobileFiring ||
         _keysPressed.contains(LogicalKeyboardKey.space);
     final doubleTap = _player.perks.contains('doubletap');
@@ -692,7 +643,12 @@ class ZombieGame extends FlameGame with KeyboardEvents {
       ));
     }
 
-    _muzzleFlashTimer = 0.08;
+    _spawnParticles(
+      px + cos(_player.angle) * 24,
+      py + sin(_player.angle) * 24,
+      0xFFFFFF00, 3, 2, life: 0.1,
+    );
+
     _triggerShake(2, 0.05);
   }
 
@@ -712,7 +668,6 @@ class ZombieGame extends FlameGame with KeyboardEvents {
       // Barricade attack phase
       if (!z.insideMap && z.targetBarricade != null) {
         if (z.targetBarricade!.intact) {
-          // Attack barricade
           if (z.attackCooldown > 0) {
             z.attackCooldown -= dt;
           } else {
@@ -720,9 +675,8 @@ class ZombieGame extends FlameGame with KeyboardEvents {
             z.targetBarricade!.hitPlank(z.damage);
           }
           z.limbOffset += dt * 4;
-          continue; // Don't move while attacking barricade
+          continue;
         } else {
-          // Barricade broken, enter the map
           z.insideMap = true;
           z.targetBarricade = null;
         }
@@ -750,7 +704,6 @@ class ZombieGame extends FlameGame with KeyboardEvents {
       } else {
         double moveAngle = z.angle;
         if (z.stuckTimer > 0.5) {
-          // Improved stuck resolution: try perpendicular directions
           moveAngle += (z.stuckTimer > 1.0 ? pi / 2 : pi / 4) *
               (z.stuckTimer.toInt() % 2 == 0 ? 1 : -1);
           if (z.stuckTimer > 2.0) z.stuckTimer = 0;
@@ -783,7 +736,7 @@ class ZombieGame extends FlameGame with KeyboardEvents {
           }
         }
 
-        // POST-MOVE WALL RESOLUTION: push zombie out of any wall it ended up in
+        // POST-MOVE WALL RESOLUTION
         _resolveWallOverlap(z, walls);
 
         final moved = _dist(z.x, z.y, z.lastX, z.lastY);
@@ -801,13 +754,11 @@ class ZombieGame extends FlameGame with KeyboardEvents {
       if (!_rectCollision(z.x, z.y, z.width, z.height,
           wall.x, wall.y, wall.w, wall.h)) continue;
 
-      // Calculate overlap on each axis
       final overlapLeft = (z.x + z.width) - wall.x;
       final overlapRight = (wall.x + wall.w) - z.x;
       final overlapTop = (z.y + z.height) - wall.y;
       final overlapBottom = (wall.y + wall.h) - z.y;
 
-      // Find minimum push direction
       final minOverlap = [overlapLeft, overlapRight, overlapTop, overlapBottom]
           .reduce(min);
 
@@ -834,6 +785,7 @@ class ZombieGame extends FlameGame with KeyboardEvents {
         if (_rectCollision(b.x - b.size / 2, b.y - b.size / 2, b.size, b.size,
             wall.x, wall.y, wall.w, wall.h)) {
           b.alive = false;
+          _spawnParticles(b.x, b.y, 0xFFFFFF00, 3, 2, life: 0.2);
           break;
         }
       }
@@ -847,6 +799,7 @@ class ZombieGame extends FlameGame with KeyboardEvents {
             final dmg = _instaKillTimer > 0 ? 99999.0 : b.damage;
             final killed = z.takeDamage(dmg);
             _player.addPoints(z.pointsOnHit * (_doublePointsTimer > 0 ? 2 : 1));
+            _spawnParticles(b.x, b.y, 0xFF8B0000, 3, 2, life: 0.3);
 
             if (killed) {
               _onZombieKilled(z);
@@ -862,6 +815,7 @@ class ZombieGame extends FlameGame with KeyboardEvents {
                   if (sk) _onZombieKilled(oz);
                 }
               }
+              _spawnParticles(b.x, b.y, 0xFF00FF00, 10, 5, life: 0.4);
             }
             break;
           }
@@ -935,70 +889,11 @@ class ZombieGame extends FlameGame with KeyboardEvents {
     }
   }
 
-  void _updateInteractionPrompt() {
-    _interactionPrompt = null;
-    if (!_player.alive) return;
-    final px = _player.x + _player.width / 2;
-    final py = _player.y + _player.height / 2;
-
-    // Check what the player is looking at (within range)
-    for (final spawn in _map.zombieSpawns) {
-      final dist = _dist(px, py, spawn.x + tileSize / 2, spawn.y + tileSize / 2);
-      if (dist < 80 && spawn.barricade.planks < spawn.barricade.maxPlanks) {
-        _interactionPrompt = '[F] Repair Barricade (${spawn.barricade.planks}/${spawn.barricade.maxPlanks})';
-        return;
-      }
-    }
-
-    for (final door in _map.doors) {
-      if (door.open) continue;
-      final dist = _dist(px, py, door.x + door.w / 2, door.y + door.h / 2);
-      if (dist < 100) {
-        _interactionPrompt = '[F] Open Door - ${door.cost} pts';
-        return;
-      }
-    }
-
-    for (final ww in _map.wallWeapons) {
-      if (ww.requiresDoor != null && !_openedDoors.contains(ww.requiresDoor)) continue;
-      final dist = _dist(px, py, ww.x + 30, ww.y + 15);
-      if (dist < 80) {
-        _interactionPrompt = '[F] ${ww.label}';
-        return;
-      }
-    }
-
-    for (final perk in _map.perkLocations) {
-      if (perk.requiresDoor != null && !_openedDoors.contains(perk.requiresDoor)) continue;
-      final dist = _dist(px, py, perk.x + 15, perk.y + 18);
-      if (dist < 80) {
-        _interactionPrompt = '[F] ${perk.label}';
-        return;
-      }
-    }
-
-    final mb = _map.mysteryBox;
-    if (mb != null && (mb.requiresDoor == null || _openedDoors.contains(mb.requiresDoor))) {
-      final dist = _dist(px, py, mb.x + 20, mb.y + 15);
-      if (dist < 80) {
-        if (mb.active && mb.resultWeapon != null && mb.rollTimer <= 0) {
-          _interactionPrompt = '[F] Take ${WeaponData.weapons[mb.resultWeapon]?.name ?? "weapon"}';
-        } else if (!mb.active) {
-          _interactionPrompt = '[F] Mystery Box - ${MysteryBoxState.cost} pts';
-        }
-        return;
-      }
-    }
-
-    final pap = _map.packAPunch;
-    if (pap != null && !pap.active &&
-        (pap.requiresDoor == null || _openedDoors.contains(pap.requiresDoor))) {
-      final dist = _dist(px, py, pap.x + 20, pap.y + 15);
-      if (dist < 80) {
-        _interactionPrompt = '[F] Pack-a-Punch - ${PackAPunchState.cost} pts';
-        return;
-      }
-    }
+  void _updateCamera() {
+    final targetX = _player.x + _player.width / 2 - size.x / 2;
+    final targetY = _player.y + _player.height / 2 - size.y / 2;
+    _camX += (targetX - _camX) * 0.1;
+    _camY += (targetY - _camY) * 0.1;
   }
 
   // ---- Rendering ----
@@ -1007,43 +902,470 @@ class ZombieGame extends FlameGame with KeyboardEvents {
   void render(Canvas canvas) {
     super.render(canvas);
 
-    // Raycasted 3D view
-    _raycaster.render(
-      canvas, Size(size.x, size.y), _player, _map, _openedDoors, _zombies,
-      _map.zombieSpawns, _map.wallWeapons, _map.perkLocations,
-      _map.mysteryBox, _map.packAPunch,
-      _player.currentWeapon, _weaponBob, _muzzleFlashTimer,
-      _shakeX, _shakeY,
-    );
+    canvas.save();
+    canvas.translate(_shakeX, _shakeY);
 
-    // Screen-space overlays
-    _renderCrosshair(canvas);
+    _renderMap(canvas);
+    _renderZombies(canvas);
+    _renderBullets(canvas);
+    _renderPlayer(canvas);
+    _renderParticles(canvas);
+    _renderFloatingTexts(canvas);
+    _renderInteractPrompts(canvas);
+    _renderMysteryBox(canvas);
+    _renderPackAPunch(canvas);
+
+    canvas.restore();
+
     _renderHUD(canvas);
     _renderDamageOverlay(canvas);
     _renderRoundDisplay(canvas);
     _renderPowerUpTimers(canvas);
-    _renderInteractionPrompt(canvas);
   }
 
-  void _renderCrosshair(Canvas canvas) {
-    final cx = size.x / 2;
-    final cy = size.y / 2;
-    final crossPaint = Paint()
-      ..color = const Color(0xAAFFFFFF)
-      ..strokeWidth = 2;
-    canvas.drawLine(Offset(cx - 10, cy), Offset(cx - 4, cy), crossPaint);
-    canvas.drawLine(Offset(cx + 4, cy), Offset(cx + 10, cy), crossPaint);
-    canvas.drawLine(Offset(cx, cy - 10), Offset(cx, cy - 4), crossPaint);
-    canvas.drawLine(Offset(cx, cy + 4), Offset(cx, cy + 10), crossPaint);
-    // Center dot
-    canvas.drawCircle(Offset(cx, cy), 1.5,
-        Paint()..color = const Color(0xCCFF0000));
+  void _renderMap(Canvas canvas) {
+    final W = _map.info.width;
+    final H = _map.info.height;
+
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, size.x, size.y),
+      Paint()..color = const Color(0xFF1a1a1a),
+    );
+
+    final startTX = max(0, (_camX / tileSize).floor());
+    final startTY = max(0, (_camY / tileSize).floor());
+    final endTX = min(W - 1, ((_camX + size.x) / tileSize).ceil());
+    final endTY = min(H - 1, ((_camY + size.y) / tileSize).ceil());
+
+    for (int ty = startTY; ty <= endTY; ty++) {
+      for (int tx = startTX; tx <= endTX; tx++) {
+        if (ty >= H || tx >= W) continue;
+        final cell = _map.grid[ty][tx];
+        final drawX = tx * tileSize - _camX;
+        final drawY = ty * tileSize - _camY;
+
+        if (cell == 0 || cell == 3) {
+          final color = (tx + ty) % 2 == 0
+              ? const Color(0xFF2a2a2a)
+              : const Color(0xFF252525);
+          canvas.drawRect(
+            Rect.fromLTWH(drawX, drawY, tileSize, tileSize),
+            Paint()..color = color,
+          );
+        }
+      }
+    }
+
+    // Walls
+    for (final wall in _map.walls) {
+      final wx = wall.x - _camX;
+      final wy = wall.y - _camY;
+      if (wx + wall.w < 0 || wx > size.x || wy + wall.h < 0 || wy > size.y) continue;
+
+      canvas.drawRect(
+        Rect.fromLTWH(wx, wy, wall.w, wall.h),
+        Paint()..color = const Color(0xFF4A4A4A),
+      );
+      canvas.drawRect(
+        Rect.fromLTWH(wx, wy, wall.w, 2),
+        Paint()..color = const Color(0xFF5A5A5A),
+      );
+      canvas.drawRect(
+        Rect.fromLTWH(wx, wy, 2, wall.h),
+        Paint()..color = const Color(0xFF5A5A5A),
+      );
+    }
+
+    // Doors
+    for (final door in _map.doors) {
+      if (door.open) continue;
+      final dx = door.x - _camX;
+      final dy = door.y - _camY;
+      if (dx + door.w < 0 || dx > size.x || dy + door.h < 0 || dy > size.y) continue;
+
+      canvas.drawRect(
+        Rect.fromLTWH(dx, dy, door.w, door.h),
+        Paint()..color = const Color(0xFF8B4513),
+      );
+      canvas.drawRect(
+        Rect.fromLTWH(dx + 2, dy + 2, door.w - 4, door.h - 4),
+        Paint()
+          ..color = const Color(0xFFDAA520)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
+      _drawText(canvas, '${door.cost}', dx + door.w / 2, dy + door.h / 2 + 4,
+          const Color(0xFFFFD700), 10, TextAlign.center);
+    }
+
+    // Zombie spawn windows with barricade planks
+    for (final spawn in _map.zombieSpawns) {
+      final sx = spawn.x - _camX;
+      final sy = spawn.y - _camY;
+      if (sx + tileSize < 0 || sx > size.x || sy + tileSize < 0 || sy > size.y) continue;
+
+      canvas.drawRect(
+        Rect.fromLTWH(sx, sy, tileSize, tileSize),
+        Paint()..color = const Color(0xFF2A2A3A),
+      );
+      // Draw boards based on barricade plank count
+      final planks = spawn.barricade.planks;
+      final boardPaint = Paint()
+        ..color = const Color(0xFF654321)
+        ..strokeWidth = 3
+        ..style = PaintingStyle.stroke;
+      final spacing = tileSize / (spawn.barricade.maxPlanks + 1);
+      for (int b = 0; b < planks; b++) {
+        final offset = spacing * (b + 1);
+        canvas.drawLine(
+          Offset(sx + 2, sy + offset),
+          Offset(sx + tileSize - 2, sy + offset),
+          boardPaint,
+        );
+      }
+    }
+
+    // Wall weapons
+    for (final ww in _map.wallWeapons) {
+      if (ww.requiresDoor != null && !_openedDoors.contains(ww.requiresDoor)) continue;
+      final wx = ww.x - _camX;
+      final wy = ww.y - _camY;
+
+      canvas.drawRect(
+        Rect.fromLTWH(wx - 5, wy - 5, 70, 30),
+        Paint()..color = const Color(0xFF333333),
+      );
+      canvas.drawRect(
+        Rect.fromLTWH(wx - 5, wy - 5, 70, 30),
+        Paint()
+          ..color = const Color(0xFFFFFFFF)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+
+      final wColor = Color(WeaponData.weapons[ww.weapon]?.color ?? 0xFFFFFFFF);
+      _drawText(canvas, ww.label, wx + 30, wy + 7, wColor, 8, TextAlign.center);
+      _drawText(canvas, '[F] Buy', wx + 30, wy + 18, const Color(0xFFCCCCCC), 8, TextAlign.center);
+    }
+
+    // Perk machines
+    for (final perk in _map.perkLocations) {
+      if (perk.requiresDoor != null && !_openedDoors.contains(perk.requiresDoor)) continue;
+      final px = perk.x - _camX;
+      final py = perk.y - _camY;
+
+      final perkColors = {
+        'juggernog': const Color(0xFFFF4444),
+        'speedcola': const Color(0xFF44FF44),
+        'quickrevive': const Color(0xFF4444FF),
+        'staminup': const Color(0xFFFFFF44),
+        'doubletap': const Color(0xFFFF8800),
+      };
+
+      final color = perkColors[perk.perk] ?? const Color(0xFFFFFFFF);
+      final pulse = 0.6 + sin(DateTime.now().millisecondsSinceEpoch * 0.003) * 0.2;
+      canvas.drawRect(
+        Rect.fromLTWH(px, py, 30, 36),
+        Paint()..color = color.withAlpha((pulse * 255).round()),
+      );
+      canvas.drawRect(
+        Rect.fromLTWH(px, py, 30, 36),
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
+
+      _drawText(canvas, perk.perk.toUpperCase().substring(0, min(5, perk.perk.length)),
+          px + 15, py + 14, const Color(0xFFFFFFFF), 7, TextAlign.center);
+      _drawText(canvas, '${perk.cost}', px + 15, py + 26,
+          const Color(0xFFFFFFFF), 8, TextAlign.center);
+    }
   }
 
-  void _renderInteractionPrompt(Canvas canvas) {
-    if (_interactionPrompt == null) return;
-    _drawText(canvas, _interactionPrompt!, size.x / 2, size.y * 0.65,
-        const Color(0xFFFFD700), 16, TextAlign.center);
+  void _renderMysteryBox(Canvas canvas) {
+    final mb = _map.mysteryBox;
+    if (mb == null) return;
+    if (mb.requiresDoor != null && !_openedDoors.contains(mb.requiresDoor)) return;
+
+    final bx = mb.x - _camX;
+    final by = mb.y - _camY;
+
+    final glow = sin(DateTime.now().millisecondsSinceEpoch * 0.004) * 0.3 + 0.7;
+    canvas.drawRect(
+      Rect.fromLTWH(bx, by, 40, 30),
+      Paint()..color = Color.fromARGB((glow * 255).round(), 0, 150, 255),
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(bx, by, 40, 30),
+      Paint()
+        ..color = const Color(0xFF00AAFF)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+
+    _drawText(canvas, '?', bx + 20, by + 20, const Color(0xFFFFFFFF), 18, TextAlign.center);
+
+    if (mb.active) {
+      if (mb.rollTimer > 0 && mb.rollingWeapon != null) {
+        final name = WeaponData.weapons[mb.rollingWeapon]?.name ?? '???';
+        _drawText(canvas, name, bx + 20, by - 10, const Color(0xFF00FFFF), 12, TextAlign.center);
+      } else if (mb.resultWeapon != null) {
+        final name = WeaponData.weapons[mb.resultWeapon]?.name ?? '???';
+        _drawText(canvas, name, bx + 20, by - 10, const Color(0xFF00FF00), 14, TextAlign.center);
+        _drawText(canvas, '[F] Take', bx + 20, by + 45, const Color(0xFFFFFFFF), 10, TextAlign.center);
+      }
+    } else {
+      _drawText(canvas, '${MysteryBoxState.cost} pts', bx + 20, by + 42,
+          const Color(0xFF00AAFF), 9, TextAlign.center);
+    }
+  }
+
+  void _renderPackAPunch(Canvas canvas) {
+    final pap = _map.packAPunch;
+    if (pap == null) return;
+    if (pap.requiresDoor != null && !_openedDoors.contains(pap.requiresDoor)) return;
+
+    final px = pap.x - _camX;
+    final py = pap.y - _camY;
+
+    final glow = sin(DateTime.now().millisecondsSinceEpoch * 0.003) * 0.3 + 0.7;
+    canvas.drawRect(
+      Rect.fromLTWH(px, py, 40, 36),
+      Paint()..color = Color.fromARGB((glow * 255).round(), 180, 0, 255),
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(px, py, 40, 36),
+      Paint()
+        ..color = const Color(0xFFFF00FF)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+
+    _drawText(canvas, 'PaP', px + 20, py + 16, const Color(0xFFFFFFFF), 12, TextAlign.center);
+
+    if (pap.active) {
+      _drawText(canvas, 'UPGRADING...', px + 20, py - 10, const Color(0xFFFF00FF), 12, TextAlign.center);
+    } else {
+      _drawText(canvas, '${PackAPunchState.cost}', px + 20, py + 30,
+          const Color(0xFFFF00FF), 9, TextAlign.center);
+    }
+  }
+
+  void _renderInteractPrompts(Canvas canvas) {
+    if (!_player.alive) return;
+    final px = _player.x + _player.width / 2;
+    final py = _player.y + _player.height / 2;
+
+    for (final door in _map.doors) {
+      if (door.open) continue;
+      final dist = _dist(px, py, door.x + door.w / 2, door.y + door.h / 2);
+      if (dist < 100) {
+        _drawText(canvas, 'Press [F] - ${door.cost} pts',
+            door.x + door.w / 2 - _camX, door.y - 15 - _camY,
+            const Color(0xFFFFD700), 11, TextAlign.center);
+      }
+    }
+  }
+
+  void _renderPlayer(Canvas canvas) {
+    if (!_player.alive) return;
+    final drawX = _player.x - _camX;
+    final drawY = _player.y - _camY;
+    final cx = drawX + _player.width / 2;
+    final cy = drawY + _player.height / 2;
+
+    canvas.save();
+    canvas.translate(cx, cy);
+    canvas.rotate(_player.angle);
+
+    canvas.drawRect(
+      Rect.fromLTWH(-_player.width / 2, -_player.height / 2, _player.width, _player.height),
+      Paint()..color = const Color(0xFF4A90D9),
+    );
+
+    final weaponColor = Color(_player.currentWeapon.color);
+    canvas.drawRect(
+      Rect.fromLTWH(_player.width / 2 - 4, -3, 16, 6),
+      Paint()..color = weaponColor,
+    );
+
+    if (_player.currentWeapon.isPaP) {
+      canvas.drawRect(
+        Rect.fromLTWH(_player.width / 2 - 4, -3, 16, 6),
+        Paint()
+          ..color = weaponColor
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8),
+      );
+    }
+
+    canvas.drawRect(
+      Rect.fromLTWH(6, -6, 4, 4),
+      Paint()..color = const Color(0xFFFFFFFF),
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(6, 2, 4, 4),
+      Paint()..color = const Color(0xFFFFFFFF),
+    );
+
+    canvas.restore();
+
+    if (_player.health < _player.maxHealth) {
+      final barW = 36.0;
+      final barH = 4.0;
+      canvas.drawRect(
+        Rect.fromLTWH(cx - barW / 2, drawY - 10, barW, barH),
+        Paint()..color = const Color(0xFF333333),
+      );
+      final ratio = _player.health / _player.maxHealth;
+      final barColor = ratio > 0.5
+          ? const Color(0xFF00FF00)
+          : ratio > 0.25
+              ? const Color(0xFFFFFF00)
+              : const Color(0xFFFF0000);
+      canvas.drawRect(
+        Rect.fromLTWH(cx - barW / 2, drawY - 10, barW * ratio, barH),
+        Paint()..color = barColor,
+      );
+    }
+  }
+
+  void _renderZombies(Canvas canvas) {
+    for (final z in _zombies) {
+      final drawX = z.x - _camX;
+      final drawY = z.y - _camY;
+      final cx = drawX + z.width / 2;
+      final cy = drawY + z.height / 2;
+
+      if (!z.alive) {
+        if (z.deathTimer > 0) {
+          canvas.drawRect(
+            Rect.fromLTWH(drawX + 2, drawY + 2, z.width - 4, z.height - 4),
+            Paint()..color = Color.fromARGB(
+              (min(1.0, z.deathTimer) * 255).round(), 58, 26, 10),
+          );
+        }
+        continue;
+      }
+
+      canvas.save();
+      canvas.translate(cx, cy);
+      canvas.rotate(z.angle);
+
+      Color bodyColor;
+      switch (z.type) {
+        case 'brute':
+          bodyColor = const Color(0xFF5A2D0C);
+          break;
+        case 'runner':
+          bodyColor = const Color(0xFF4A5A2D);
+          break;
+        default:
+          bodyColor = const Color(0xFF3D5A3D);
+      }
+
+      final sizeM = z.type == 'brute' ? 1.3 : 1.0;
+
+      canvas.drawRect(
+        Rect.fromLTWH(-z.width / 2 * sizeM, -z.height / 2 * sizeM,
+            z.width * sizeM, z.height * sizeM),
+        Paint()..color = bodyColor,
+      );
+
+      final armColor = z.type == 'brute'
+          ? const Color(0xFF4A1D00)
+          : const Color(0xFF2D4A2D);
+      final armSwing = sin(z.limbOffset) * 0.3;
+      canvas.save();
+      canvas.rotate(armSwing);
+      canvas.drawRect(
+        Rect.fromLTWH(z.width / 2 * sizeM - 2, -8 * sizeM, 14, 5),
+        Paint()..color = armColor,
+      );
+      canvas.restore();
+      canvas.save();
+      canvas.rotate(-armSwing);
+      canvas.drawRect(
+        Rect.fromLTWH(z.width / 2 * sizeM - 2, 3 * sizeM, 14, 5),
+        Paint()..color = armColor,
+      );
+      canvas.restore();
+
+      final eyeColor = z.type == 'runner'
+          ? const Color(0xFFFFFF00)
+          : const Color(0xFFFF0000);
+      canvas.drawRect(
+        Rect.fromLTWH(6, -5 * sizeM, 3, 3),
+        Paint()..color = eyeColor,
+      );
+      canvas.drawRect(
+        Rect.fromLTWH(6, 2 * sizeM, 3, 3),
+        Paint()..color = eyeColor,
+      );
+
+      canvas.restore();
+
+      if (z.health < z.maxHealth) {
+        final barW = 24 * sizeM;
+        const barH = 3.0;
+        canvas.drawRect(
+          Rect.fromLTWH(cx - barW / 2, drawY - 8, barW, barH),
+          Paint()..color = const Color(0xFF333333),
+        );
+        final ratio = z.health / z.maxHealth;
+        canvas.drawRect(
+          Rect.fromLTWH(cx - barW / 2, drawY - 8, barW * ratio, barH),
+          Paint()..color = ratio > 0.5 ? const Color(0xFFFF0000) : const Color(0xFFFF4500),
+        );
+      }
+    }
+  }
+
+  void _renderBullets(Canvas canvas) {
+    for (final b in _bullets) {
+      final bx = b.x - _camX;
+      final by = b.y - _camY;
+      final color = Color(b.color);
+
+      if (b.isPaP) {
+        canvas.drawRect(
+          Rect.fromLTWH(bx - b.size / 2, by - b.size / 2, b.size, b.size),
+          Paint()
+            ..color = color
+            ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 6),
+        );
+      }
+      canvas.drawRect(
+        Rect.fromLTWH(bx - b.size / 2, by - b.size / 2, b.size, b.size),
+        Paint()..color = color,
+      );
+    }
+  }
+
+  void _renderParticles(Canvas canvas) {
+    for (final p in _particles) {
+      final alpha = (p.life / p.maxLife * 255).round().clamp(0, 255);
+      canvas.drawRect(
+        Rect.fromLTWH(
+          p.x - _camX - p.size / 2,
+          p.y - _camY - p.size / 2,
+          p.size, p.size,
+        ),
+        Paint()..color = Color(p.color).withAlpha(alpha),
+      );
+    }
+  }
+
+  void _renderFloatingTexts(Canvas canvas) {
+    for (final ft in _floatingTexts) {
+      final alpha = (ft.life * 255).round().clamp(0, 255);
+      _drawText(
+        canvas, ft.text,
+        ft.x - _camX, ft.y - _camY,
+        Color(ft.color).withAlpha(alpha),
+        ft.size, TextAlign.center,
+      );
+    }
   }
 
   void _renderDamageOverlay(Canvas canvas) {
@@ -1070,11 +1392,11 @@ class ZombieGame extends FlameGame with KeyboardEvents {
         ? 'RELOADING...'
         : '${weapon.currentAmmo} / ${weapon.currentReserve}';
 
-    // Ammo - bottom right
-    _drawText(canvas, ammoText, size.x - 20, size.y - 30,
-        const Color(0xFFFFFFFF), 24, TextAlign.right);
-    _drawText(canvas, weapon.name, size.x - 20, size.y - 8,
-        Color(weapon.color), 14, TextAlign.right);
+    // Ammo display - bottom center
+    _drawText(canvas, ammoText, size.x / 2, size.y - 40,
+        const Color(0xFFFFFFFF), 24, TextAlign.center);
+    _drawText(canvas, weapon.name, size.x / 2, size.y - 16,
+        Color(weapon.color), 14, TextAlign.center);
 
     // Points - top left
     _drawText(canvas, 'POINTS', 20, 25,
@@ -1094,7 +1416,7 @@ class ZombieGame extends FlameGame with KeyboardEvents {
 
     // Health bar - bottom left
     final hbarX = 20.0;
-    final hbarY = size.y - 50.0;
+    final hbarY = size.y - 60.0;
     final hbarW = 150.0;
     final hbarH = 12.0;
     canvas.drawRect(
@@ -1139,7 +1461,7 @@ class ZombieGame extends FlameGame with KeyboardEvents {
       final w = _player.weapons[i];
       final isActive = i == _player.currentWeaponIndex;
       final slotX = size.x - 180.0;
-      final slotY = size.y - 70.0 + i * 22.0;
+      final slotY = size.y - 80.0 + i * 22.0;
       final wColor = Color(w.color);
 
       if (isActive) {

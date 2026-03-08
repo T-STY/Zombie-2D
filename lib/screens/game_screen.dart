@@ -54,19 +54,24 @@ class _GameScreenState extends State<GameScreen> {
     return Scaffold(
       body: Stack(
         children: [
+          // Desktop: mouse position for aiming, click to fire
           Listener(
             onPointerHover: (event) {
-              _game.updateMouseDelta(event.delta.dx);
+              _game.updateMousePosition(
+                event.localPosition.dx,
+                event.localPosition.dy,
+              );
             },
             onPointerMove: (event) {
-              _game.updateMouseDelta(event.delta.dx);
+              _game.updateMousePosition(
+                event.localPosition.dx,
+                event.localPosition.dy,
+              );
             },
             onPointerDown: (event) {
-              // Primary button (left click) = fire
               if (event.buttons & 0x01 != 0) {
                 _game.setFiring(true);
               }
-              // Secondary button (right click) = knife
               if (event.buttons & 0x02 != 0) {
                 _game.onKnife();
               }
@@ -222,13 +227,20 @@ class _MobileControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Only show on mobile-sized screens
     return LayoutBuilder(
       builder: (context, constraints) {
-        // Always show touch controls as an overlay
         return Stack(
           children: [
-            // Left side - Movement joystick area
+            // Right half of screen = aim area (touch to aim)
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              width: constraints.maxWidth / 2,
+              child: _AimArea(game: game),
+            ),
+
+            // Left side - Movement joystick
             Positioned(
               left: 20,
               bottom: 20,
@@ -239,62 +251,89 @@ class _MobileControls extends StatelessWidget {
                 },
               ),
             ),
-            // Right side - Action buttons
+
+            // Top-right - FIRE button (index finger accessible)
             Positioned(
-              right: 20,
-              bottom: 20,
-              child: Column(
+              right: 16,
+              top: 16,
+              child: _IconActionButton(
+                icon: Icons.my_location,
+                size: 64,
+                color: Colors.red[700]!,
+                onTapDown: () => game.setMobileFiring(true),
+                onTapUp: () => game.setMobileFiring(false),
+              ),
+            ),
+
+            // Left side - action buttons (vertical stack above joystick)
+            Positioned(
+              left: 160,
+              bottom: 28,
+              child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _ActionButton(
-                        label: 'R',
-                        size: 48,
-                        color: Colors.blue[700]!,
-                        onTap: () => game.onReloadPressed(),
-                      ),
-                      const SizedBox(width: 8),
-                      _ActionButton(
-                        label: 'Q',
-                        size: 48,
-                        color: Colors.purple[700]!,
-                        onTap: () => game.onSwitchWeapon(),
-                      ),
-                    ],
+                  // Reload
+                  _IconActionButton(
+                    icon: Icons.refresh,
+                    size: 48,
+                    color: Colors.blue[700]!,
+                    onTap: () => game.onReloadPressed(),
                   ),
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _ActionButton(
-                        label: 'F',
-                        size: 48,
-                        color: Colors.green[700]!,
-                        onTap: () => game.onInteract(),
-                      ),
-                      const SizedBox(width: 8),
-                      _ActionButton(
-                        label: 'V',
-                        size: 48,
-                        color: Colors.orange[700]!,
-                        onTap: () => game.onKnife(),
-                      ),
-                    ],
+                  const SizedBox(width: 8),
+                  // Switch weapon
+                  _IconActionButton(
+                    icon: Icons.swap_horiz,
+                    size: 48,
+                    color: Colors.purple[700]!,
+                    onTap: () => game.onSwitchWeapon(),
                   ),
-                  const SizedBox(height: 12),
-                  _ActionButton(
-                    label: 'FIRE',
-                    size: 72,
-                    color: Colors.red[700]!,
-                    onTapDown: () => game.setMobileFiring(true),
-                    onTapUp: () => game.setMobileFiring(false),
+                  const SizedBox(width: 8),
+                  // Interact
+                  _IconActionButton(
+                    icon: Icons.touch_app,
+                    size: 48,
+                    color: Colors.green[700]!,
+                    onTap: () => game.onInteract(),
+                  ),
+                  const SizedBox(width: 8),
+                  // Knife
+                  _IconActionButton(
+                    icon: Icons.content_cut,
+                    size: 48,
+                    color: Colors.orange[700]!,
+                    onTap: () => game.onKnife(),
                   ),
                 ],
               ),
             ),
           ],
+        );
+      },
+    );
+  }
+}
+
+/// Invisible area on right half of screen for touch-to-aim
+class _AimArea extends StatelessWidget {
+  final ZombieGame game;
+
+  const _AimArea({required this.game});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onPanUpdate: (details) {
+        // Send the global touch position as aiming target
+        game.updateMousePosition(
+          details.globalPosition.dx,
+          details.globalPosition.dy,
+        );
+      },
+      onPanStart: (details) {
+        game.updateMousePosition(
+          details.globalPosition.dx,
+          details.globalPosition.dy,
         );
       },
     );
@@ -371,16 +410,16 @@ class _JoystickState extends State<_Joystick> {
   }
 }
 
-class _ActionButton extends StatelessWidget {
-  final String label;
+class _IconActionButton extends StatelessWidget {
+  final IconData icon;
   final double size;
   final Color color;
   final VoidCallback? onTap;
   final VoidCallback? onTapDown;
   final VoidCallback? onTapUp;
 
-  const _ActionButton({
-    required this.label,
+  const _IconActionButton({
+    required this.icon,
     required this.size,
     required this.color,
     this.onTap,
@@ -399,19 +438,16 @@ class _ActionButton extends StatelessWidget {
         width: size,
         height: size,
         decoration: BoxDecoration(
-          shape: size > 60 ? BoxShape.circle : BoxShape.rectangle,
-          borderRadius: size <= 60 ? BorderRadius.circular(8) : null,
+          shape: size > 56 ? BoxShape.circle : BoxShape.rectangle,
+          borderRadius: size <= 56 ? BorderRadius.circular(12) : null,
           color: color.withAlpha(120),
           border: Border.all(color: color, width: 2),
         ),
         child: Center(
-          child: Text(
-            label,
-            style: TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.bold,
-              fontSize: size > 60 ? 14 : 12,
-            ),
+          child: Icon(
+            icon,
+            color: Colors.white,
+            size: size * 0.45,
           ),
         ),
       ),
