@@ -6,12 +6,13 @@ import '../models/map_data.dart';
 import '../models/weapon_data.dart';
 
 class Raycaster {
-  static const double fov = 66 * pi / 180; // 66 degrees in radians
-  static const double maxDist = 30.0; // max render distance in tiles
-  static const int stripWidth = 2; // render every 2 pixels for performance
+  static const double fov = 66 * pi / 180;
+  static const double maxDist = 30.0;
+  static const int stripWidth = 2;
 
   late List<double> _zBuffer;
   int _screenW = 0;
+  double _time = 0;
 
   void render(
     Canvas canvas,
@@ -33,6 +34,7 @@ class Raycaster {
   ) {
     _screenW = screenSize.width.toInt();
     _zBuffer = List.filled(_screenW, maxDist * tileSize);
+    _time += 0.016; // approximate frame time
 
     final px = player.x + player.width / 2;
     final py = player.y + player.height / 2;
@@ -41,47 +43,56 @@ class Raycaster {
     canvas.save();
     canvas.translate(shakeX, shakeY);
 
-    _renderCeilingFloor(canvas, screenSize);
-    _renderWalls(canvas, screenSize, px, py, pAngle, map, openedDoors);
+    _renderCeilingFloor(canvas, screenSize, pAngle);
+    _renderWalls(canvas, screenSize, px, py, pAngle, map, openedDoors, spawns);
     _renderSprites(canvas, screenSize, px, py, pAngle, zombies, spawns,
         wallWeapons, perks, mysteryBox, packAPunch, openedDoors, map);
-    _renderWeaponView(canvas, screenSize, currentWeapon, weaponBob, muzzleFlashTimer);
+    _renderWeaponView(canvas, screenSize, currentWeapon, weaponBob, muzzleFlashTimer, player);
 
     canvas.restore();
   }
 
-  void _renderCeilingFloor(Canvas canvas, Size size) {
-    // Ceiling - dark grey gradient
-    final ceilPaint = Paint();
-    for (int y = 0; y < size.height ~/ 2; y++) {
-      final t = y / (size.height / 2);
-      final shade = (20 + t * 30).round().clamp(0, 255);
-      ceilPaint.color = Color.fromARGB(255, shade ~/ 2, shade ~/ 2, shade);
-      canvas.drawLine(
-        Offset(0, y.toDouble()),
-        Offset(size.width, y.toDouble()),
-        ceilPaint,
-      );
-    }
+  void _renderCeilingFloor(Canvas canvas, Size size, double pAngle) {
+    final halfH = size.height / 2;
+    final w = size.width;
 
-    // Floor - dark brown/green gradient
-    final floorPaint = Paint();
-    for (int y = size.height ~/ 2; y < size.height.toInt(); y++) {
-      final t = (y - size.height / 2) / (size.height / 2);
-      final shade = (20 + t * 40).round().clamp(0, 255);
-      floorPaint.color = Color.fromARGB(255, shade, shade ~/ 2 + 5, shade ~/ 3);
-      canvas.drawLine(
-        Offset(0, y.toDouble()),
-        Offset(size.width, y.toDouble()),
-        floorPaint,
-      );
-    }
+    // Ceiling - dark atmospheric gradient (just 2 large rects)
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, w, halfH * 0.5),
+      Paint()..color = const Color(0xFF080810),
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(0, halfH * 0.5, w, halfH * 0.5),
+      Paint()..color = const Color(0xFF0E1018),
+    );
+
+    // Floor - dark concrete with subtle gradient (3 bands)
+    final floorBandH = halfH / 3;
+    canvas.drawRect(
+      Rect.fromLTWH(0, halfH, w, floorBandH),
+      Paint()..color = const Color(0xFF1A1A18),
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(0, halfH + floorBandH, w, floorBandH),
+      Paint()..color = const Color(0xFF1E1D19),
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(0, halfH + floorBandH * 2, w, floorBandH),
+      Paint()..color = const Color(0xFF22211B),
+    );
+
+    // Fog at horizon line for atmosphere
+    canvas.drawRect(
+      Rect.fromLTWH(0, halfH - 6, w, 12),
+      Paint()..color = const Color(0x22181820),
+    );
   }
 
   void _renderWalls(Canvas canvas, Size size, double px, double py,
-      double pAngle, BuiltMap map, Set<String> openedDoors) {
+      double pAngle, BuiltMap map, Set<String> openedDoors, List<SpawnPoint> spawns) {
     final halfFov = fov / 2;
     final numRays = _screenW ~/ stripWidth;
+    final halfH = size.height / 2;
 
     for (int i = 0; i < numRays; i++) {
       final screenX = i * stripWidth;
@@ -90,10 +101,8 @@ class Raycaster {
       final result = _castRay(px, py, rayAngle, map, openedDoors);
       if (result == null) continue;
 
-      // Fix fisheye with cos correction
       final correctedDist = result.distance * cos(rayAngle - pAngle);
       _zBuffer[screenX] = correctedDist;
-      // Fill all columns this strip covers
       for (int s = 1; s < stripWidth && screenX + s < _screenW; s++) {
         _zBuffer[screenX + s] = correctedDist;
       }
@@ -101,78 +110,171 @@ class Raycaster {
       if (correctedDist <= 0) continue;
 
       final wallHeight = (tileSize * size.height / correctedDist).clamp(0.0, size.height * 3);
-      final wallTop = (size.height - wallHeight) / 2;
+      final wallTop = halfH - wallHeight / 2;
 
-      // Wall color based on type and side
-      Color wallColor;
-      switch (result.cellType) {
-        case 1: // Wall
-          wallColor = result.side == 0
-              ? const Color(0xFF5A5A5A)
-              : const Color(0xFF4A4A4A);
-          break;
-        case 2: // Door (closed)
-          wallColor = result.side == 0
-              ? const Color(0xFFB8860B)
-              : const Color(0xFF8B6914);
-          break;
-        case 3: // Window/barricade
-          wallColor = result.side == 0
-              ? const Color(0xFF3A3A5A)
-              : const Color(0xFF2A2A4A);
-          break;
-        default:
-          wallColor = const Color(0xFF4A4A4A);
+      // Distance fog factor (exponential for more realism)
+      final normalizedDist = correctedDist / (maxDist * tileSize);
+      final fogFactor = exp(-normalizedDist * 3.0).clamp(0.08, 1.0);
+
+      // Calculate texture coordinate for brick pattern
+      final wallU = result.wallU;
+
+      // Base wall colors with more variation
+      _drawWallStrip(canvas, screenX.toDouble(), wallTop, wallHeight,
+          result, fogFactor, wallU, spawns, size);
+    }
+  }
+
+  void _drawWallStrip(Canvas canvas, double x, double top, double height,
+      _RayResult result, double fog, double? wallU, List<SpawnPoint> spawns, Size screenSize) {
+
+    // Base colors per wall type
+    int baseR, baseG, baseB;
+    switch (result.cellType) {
+      case 1: // Concrete wall
+        baseR = result.side == 0 ? 95 : 75;
+        baseG = result.side == 0 ? 90 : 72;
+        baseB = result.side == 0 ? 82 : 65;
+        break;
+      case 2: // Door (closed)
+        baseR = result.side == 0 ? 140 : 115;
+        baseG = result.side == 0 ? 85 : 70;
+        baseB = result.side == 0 ? 25 : 20;
+        break;
+      case 3: // Window/barricade
+        baseR = result.side == 0 ? 60 : 48;
+        baseG = result.side == 0 ? 58 : 46;
+        baseB = result.side == 0 ? 72 : 58;
+        break;
+      default:
+        baseR = 70; baseG = 70; baseB = 65;
+    }
+
+    // Apply fog
+    final r = (baseR * fog).round().clamp(0, 255);
+    final g = (baseG * fog).round().clamp(0, 255);
+    final b = (baseB * fog).round().clamp(0, 255);
+
+    // Main wall strip
+    canvas.drawRect(
+      Rect.fromLTWH(x, top, stripWidth.toDouble(), height),
+      Paint()..color = Color.fromARGB(255, r, g, b),
+    );
+
+    // Brick mortar lines (subtle horizontal lines for texture)
+    if (result.cellType == 1 && height > 30) {
+      final mortarColor = Color.fromARGB(40, 0, 0, 0);
+      final mortarPaint = Paint()..color = mortarColor;
+      final brickH = height / 8;
+      for (int row = 1; row < 8; row++) {
+        final ly = top + row * brickH;
+        canvas.drawRect(
+          Rect.fromLTWH(x, ly, stripWidth.toDouble(), 1),
+          mortarPaint,
+        );
       }
 
-      // Distance-based darkening (fog)
-      final fogFactor = (1 - correctedDist / (maxDist * tileSize)).clamp(0.2, 1.0);
-      final r = (wallColor.red * fogFactor).round();
-      final g = (wallColor.green * fogFactor).round();
-      final b = (wallColor.blue * fogFactor).round();
-      wallColor = Color.fromARGB(255, r, g, b);
-
-      canvas.drawRect(
-        Rect.fromLTWH(screenX.toDouble(), wallTop, stripWidth.toDouble(), wallHeight),
-        Paint()..color = wallColor,
-      );
-
-      // Draw boards on windows
-      if (result.cellType == 3) {
-        final boardColor = Color.fromARGB(
-          255,
-          (100 * fogFactor).round(),
-          (70 * fogFactor).round(),
-          (33 * fogFactor).round(),
-        );
-        final boardPaint = Paint()
-          ..color = boardColor
-          ..strokeWidth = max(1, (3 * tileSize / correctedDist));
-        for (int b = 0; b < 3; b++) {
-          final boardY = wallTop + wallHeight * (0.2 + b * 0.3);
-          canvas.drawLine(
-            Offset(screenX.toDouble(), boardY),
-            Offset(screenX.toDouble() + stripWidth, boardY),
-            boardPaint,
+      // Vertical mortar (offset per row for brick pattern)
+      final u = wallU ?? 0;
+      if (u != 0) {
+        final brickW = 0.25; // fraction of tile
+        final uMod = u % brickW;
+        if (uMod < 0.02 || uMod > brickW - 0.02) {
+          canvas.drawRect(
+            Rect.fromLTWH(x, top, stripWidth.toDouble(), height),
+            Paint()..color = Color.fromARGB(25, 0, 0, 0),
           );
         }
       }
+    }
 
-      // Door frame detail
-      if (result.cellType == 2) {
-        final frameColor = Color.fromARGB(
-          255,
-          (218 * fogFactor).round(),
-          (165 * fogFactor).round(),
-          (32 * fogFactor).round(),
-        );
+    // Edge highlight at top of wall for depth
+    if (height > 10) {
+      final highlight = Color.fromARGB(
+        (20 * fog).round().clamp(0, 255), 255, 255, 220);
+      canvas.drawRect(
+        Rect.fromLTWH(x, top, stripWidth.toDouble(), min(2, height * 0.02)),
+        Paint()..color = highlight,
+      );
+      // Dark edge at bottom
+      final shadow = Color.fromARGB(
+        (40 * fog).round().clamp(0, 255), 0, 0, 0);
+      canvas.drawRect(
+        Rect.fromLTWH(x, top + height - min(2, height * 0.02), stripWidth.toDouble(), min(2, height * 0.02)),
+        Paint()..color = shadow,
+      );
+    }
+
+    // Window boards (barricade planks)
+    if (result.cellType == 3) {
+      // Find the barricade for this window
+      int plankCount = 4; // default full
+      for (final spawn in spawns) {
+        final spawnGx = (spawn.x / tileSize).floor();
+        final spawnGy = (spawn.y / tileSize).floor();
+        if (spawnGx == result.mapX && spawnGy == result.mapY) {
+          plankCount = spawn.barricade.planks;
+          break;
+        }
+      }
+
+      // Draw boards based on plank count
+      if (plankCount > 0) {
+        final boardFogR = (110 * fog).round().clamp(0, 255);
+        final boardFogG = (75 * fog).round().clamp(0, 255);
+        final boardFogB = (35 * fog).round().clamp(0, 255);
+        final boardColor = Color.fromARGB(255, boardFogR, boardFogG, boardFogB);
+        final boardPaint = Paint()..color = boardColor;
+        final nailColor = Color.fromARGB(
+          (200 * fog).round().clamp(0, 255), 140, 140, 140);
+
+        final boardH = max(2.0, height * 0.10);
+        final spacing = height / (4 + 1);
+
+        for (int p = 0; p < plankCount; p++) {
+          final boardY = top + spacing * (p + 0.5);
+          canvas.drawRect(
+            Rect.fromLTWH(x, boardY, stripWidth.toDouble(), boardH),
+            boardPaint,
+          );
+          // Nail highlight
+          if (stripWidth >= 2) {
+            canvas.drawRect(
+              Rect.fromLTWH(x, boardY + boardH * 0.4, 1, 1),
+              Paint()..color = nailColor,
+            );
+          }
+        }
+      } else {
+        // Broken window - darker void behind
+        final voidColor = Color.fromARGB(
+          (180 * fog).round().clamp(0, 255), 5, 5, 10);
         canvas.drawRect(
-          Rect.fromLTWH(screenX.toDouble(), wallTop, stripWidth.toDouble(), 2),
-          Paint()..color = frameColor,
+          Rect.fromLTWH(x, top + height * 0.1, stripWidth.toDouble(), height * 0.8),
+          Paint()..color = voidColor,
         );
+      }
+    }
+
+    // Door frame and metal detail
+    if (result.cellType == 2) {
+      final frameR = (200 * fog).round().clamp(0, 255);
+      final frameG = (170 * fog).round().clamp(0, 255);
+      final frameB = (50 * fog).round().clamp(0, 255);
+      final frameColor = Color.fromARGB(255, frameR, frameG, frameB);
+      // Top and bottom frame
+      canvas.drawRect(
+        Rect.fromLTWH(x, top, stripWidth.toDouble(), min(3, height * 0.03)),
+        Paint()..color = frameColor,
+      );
+      canvas.drawRect(
+        Rect.fromLTWH(x, top + height - min(3, height * 0.03), stripWidth.toDouble(), min(3, height * 0.03)),
+        Paint()..color = frameColor,
+      );
+      // Center band (handle area)
+      if (height > 40) {
         canvas.drawRect(
-          Rect.fromLTWH(screenX.toDouble(), wallTop + wallHeight - 2,
-              stripWidth.toDouble(), 2),
+          Rect.fromLTWH(x, top + height * 0.45, stripWidth.toDouble(), height * 0.1),
           Paint()..color = frameColor,
         );
       }
@@ -184,11 +286,9 @@ class Raycaster {
     final dirX = cos(angle);
     final dirY = sin(angle);
 
-    // Current grid position
     int mapX = (px / tileSize).floor();
     int mapY = (py / tileSize).floor();
 
-    // Length of ray from one x/y side to next
     final deltaDistX = dirX == 0 ? 1e30 : (1 / dirX).abs() * tileSize;
     final deltaDistY = dirY == 0 ? 1e30 : (1 / dirY).abs() * tileSize;
 
@@ -210,7 +310,6 @@ class Raycaster {
       sideDistY = (mapY + 1.0 - py / tileSize) * deltaDistY;
     }
 
-    // DDA
     int side = 0;
     for (int i = 0; i < (maxDist * 2).round(); i++) {
       if (sideDistX < sideDistY) {
@@ -228,15 +327,24 @@ class Raycaster {
       }
 
       final cell = map.grid[mapY][mapX];
-      if (cell == 1) {
-        // Solid wall
+      if (cell == 1 || cell == 3) {
         final dist = side == 0
             ? sideDistX - deltaDistX
             : sideDistY - deltaDistY;
-        return _RayResult(distance: dist, side: side, cellType: 1,
-            mapX: mapX, mapY: mapY);
+        // Calculate wall texture U coordinate
+        double wallU;
+        if (side == 0) {
+          wallU = (py + dist * dirY / (dist == 0 ? 1 : 1)) / tileSize;
+          // Actually compute from exact hit point
+          wallU = py / tileSize + (dist / tileSize) * (dirY / (dirX.abs() < 0.001 ? 0.001 : dirX.abs())) * (dirX < 0 ? -1 : 1);
+          wallU = (wallU % 1.0 + 1.0) % 1.0;
+        } else {
+          wallU = px / tileSize + (dist / tileSize) * (dirX / (dirY.abs() < 0.001 ? 0.001 : dirY.abs())) * (dirY < 0 ? -1 : 1);
+          wallU = (wallU % 1.0 + 1.0) % 1.0;
+        }
+        return _RayResult(distance: dist, side: side, cellType: cell,
+            mapX: mapX, mapY: mapY, wallU: wallU);
       } else if (cell == 2) {
-        // Check if door is open
         final isDoorOpen = map.doors
             .where((d) => (d.x / tileSize).floor() == mapX &&
                           (d.y / tileSize).floor() == mapY)
@@ -246,15 +354,8 @@ class Raycaster {
               ? sideDistX - deltaDistX
               : sideDistY - deltaDistY;
           return _RayResult(distance: dist, side: side, cellType: 2,
-              mapX: mapX, mapY: mapY);
+              mapX: mapX, mapY: mapY, wallU: 0.5);
         }
-      } else if (cell == 3) {
-        // Window/barricade - always solid for rays
-        final dist = side == 0
-            ? sideDistX - deltaDistX
-            : sideDistY - deltaDistY;
-        return _RayResult(distance: dist, side: side, cellType: 3,
-            mapX: mapX, mapY: mapY);
       }
     }
     return null;
@@ -291,8 +392,8 @@ class Raycaster {
         color = Color.fromARGB((z.deathTimer.clamp(0, 1) * 255).round(), 58, 26, 10);
       } else {
         switch (z.type) {
-          case 'brute': color = const Color(0xFF5A2D0C); break;
-          case 'runner': color = const Color(0xFF4A5A2D); break;
+          case 'brute': color = const Color(0xFF6B3A1E); break;
+          case 'runner': color = const Color(0xFF4A6B2D); break;
           default: color = const Color(0xFF3D5A3D);
         }
       }
@@ -323,6 +424,7 @@ class Raycaster {
         x: sx, y: sy, dist: dist,
         color: perkColors[perk.perk] ?? const Color(0xFFFFFFFF),
         type: 'perk', sizeMultiplier: 1.0,
+        label: perk.perk[0].toUpperCase(),
       ));
     }
 
@@ -350,6 +452,7 @@ class Raycaster {
           x: sx, y: sy, dist: dist,
           color: const Color(0xFF0088FF),
           type: 'mysterybox', sizeMultiplier: 1.0,
+          label: '?',
         ));
       }
     }
@@ -364,6 +467,7 @@ class Raycaster {
           x: sx, y: sy, dist: dist,
           color: const Color(0xFFBB00FF),
           type: 'packapunch', sizeMultiplier: 1.0,
+          label: 'P',
         ));
       }
     }
@@ -371,41 +475,35 @@ class Raycaster {
     // Sort back-to-front
     sprites.sort((a, b) => b.dist.compareTo(a.dist));
 
-    // Render each sprite
     for (final sprite in sprites) {
       final dx = sprite.x - px;
       final dy = sprite.y - py;
 
-      // Calculate angle relative to player
-      final spriteAngle = atan2(dy, dx) - pAngle;
-      // Normalize to -pi..pi
-      double normAngle = spriteAngle;
-      while (normAngle > pi) normAngle -= 2 * pi;
-      while (normAngle < -pi) normAngle += 2 * pi;
+      double spriteAngle = atan2(dy, dx) - pAngle;
+      while (spriteAngle > pi) spriteAngle -= 2 * pi;
+      while (spriteAngle < -pi) spriteAngle += 2 * pi;
 
-      // Check if within FOV (with some margin)
-      if (normAngle.abs() > fov / 2 + 0.2) continue;
+      if (spriteAngle.abs() > fov / 2 + 0.3) continue;
 
-      // Screen X position
-      final screenX = (size.width / 2) * (1 + normAngle / (fov / 2));
+      final screenX = (size.width / 2) * (1 + spriteAngle / (fov / 2));
 
-      // Sprite size based on distance
       final spriteHeight = (tileSize * size.height / sprite.dist * sprite.sizeMultiplier)
           .clamp(0.0, size.height * 2);
       final spriteWidth = spriteHeight * 0.6;
       final spriteTop = halfH - spriteHeight / 2;
       final spriteLeft = screenX - spriteWidth / 2;
 
-      // Distance fog
-      final fogFactor = (1 - sprite.dist / (maxDist * tileSize)).clamp(0.1, 1.0);
+      // Exponential fog matching walls
+      final normalizedDist = sprite.dist / (maxDist * tileSize);
+      final fogFactor = exp(-normalizedDist * 3.0).clamp(0.08, 1.0);
 
-      // Z-buffer clipping (check center and edges)
+      // Z-buffer clipping
       final centerCol = screenX.round().clamp(0, _screenW - 1);
       if (sprite.dist > _zBuffer[centerCol]) continue;
 
-      final fogR = (sprite.color.red * fogFactor).round();
-      final fogG = (sprite.color.green * fogFactor).round();
-      final fogB = (sprite.color.blue * fogFactor).round();
+      final fogR = (sprite.color.red * fogFactor).round().clamp(0, 255);
+      final fogG = (sprite.color.green * fogFactor).round().clamp(0, 255);
+      final fogB = (sprite.color.blue * fogFactor).round().clamp(0, 255);
       final fogAlpha = sprite.color.alpha;
       final fogColor = Color.fromARGB(fogAlpha, fogR, fogG, fogB);
 
@@ -413,9 +511,8 @@ class Raycaster {
         _drawZombieSprite(canvas, spriteLeft, spriteTop, spriteWidth,
             spriteHeight, fogColor, sprite, fogFactor);
       } else {
-        // Generic colored rectangle for items
         _drawItemSprite(canvas, spriteLeft, spriteTop, spriteWidth,
-            spriteHeight, fogColor, sprite.type, fogFactor);
+            spriteHeight, fogColor, sprite, fogFactor);
       }
     }
   }
@@ -425,151 +522,208 @@ class Raycaster {
     final z = sprite.data as ZombieState?;
     if (z == null) return;
 
-    // Body
-    canvas.drawRect(
-      Rect.fromLTWH(left + width * 0.15, top + height * 0.1,
-          width * 0.7, height * 0.8),
-      Paint()..color = color,
+    final limbPhase = z.limbOffset;
+
+    // Shadow on ground
+    final shadowY = top + height;
+    final shadowW = width * 0.6;
+    canvas.drawOval(
+      Rect.fromCenter(
+        center: Offset(left + width / 2, shadowY),
+        width: shadowW,
+        height: shadowW * 0.2,
+      ),
+      Paint()..color = Color.fromARGB((30 * fog).round().clamp(0, 255), 0, 0, 0),
     );
 
-    // Arms
-    final armWidth = width * 0.2;
-    final armHeight = height * 0.15;
-    final armY = top + height * 0.3;
+    // Legs
+    final legW = width * 0.18;
+    final legH = height * 0.3;
+    final legY = top + height * 0.65;
+    final legSwing = sin(limbPhase) * width * 0.08;
+    final legColor = _darken(color, 0.7);
+    canvas.drawRect(
+      Rect.fromLTWH(left + width * 0.25 + legSwing, legY, legW, legH),
+      Paint()..color = legColor,
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(left + width * 0.55 - legSwing, legY, legW, legH),
+      Paint()..color = legColor,
+    );
+
+    // Torso
+    final torsoW = width * 0.55;
+    final torsoH = height * 0.4;
+    final torsoX = left + (width - torsoW) / 2;
+    final torsoY = top + height * 0.2;
+    canvas.drawRect(
+      Rect.fromLTWH(torsoX, torsoY, torsoW, torsoH),
+      Paint()..color = color,
+    );
+    // Torn clothing detail
+    final tearColor = _darken(color, 0.6);
+    canvas.drawRect(
+      Rect.fromLTWH(torsoX + torsoW * 0.1, torsoY + torsoH * 0.6, torsoW * 0.3, torsoH * 0.15),
+      Paint()..color = tearColor,
+    );
+
+    // Arms (reaching forward with swing)
+    final armW = width * 0.15;
+    final armH = height * 0.25;
+    final armY = top + height * 0.25;
+    final armSwing = sin(limbPhase * 0.8) * width * 0.06;
+    final armColor = _lighten(color, 1.1);
     // Left arm
     canvas.drawRect(
-      Rect.fromLTWH(left - armWidth * 0.5, armY, armWidth, armHeight),
-      Paint()..color = color,
+      Rect.fromLTWH(left - armW * 0.3 + armSwing, armY, armW, armH),
+      Paint()..color = armColor,
     );
     // Right arm
     canvas.drawRect(
-      Rect.fromLTWH(left + width - armWidth * 0.5, armY, armWidth, armHeight),
-      Paint()..color = color,
+      Rect.fromLTWH(left + width - armW * 0.7 - armSwing, armY, armW, armH),
+      Paint()..color = armColor,
     );
 
-    // Eyes
-    final eyeColor = z.type == 'runner'
-        ? Color.fromARGB(255, (255 * fog).round(), (255 * fog).round(), 0)
-        : Color.fromARGB(255, (255 * fog).round(), 0, 0);
-    final eyeSize = max(2.0, width * 0.12);
-    final eyeY = top + height * 0.2;
+    // Head
+    final headW = width * 0.35;
+    final headH = height * 0.22;
+    final headX = left + (width - headW) / 2;
+    final headY = top + height * 0.02;
+    final headColor = _lighten(color, 1.15);
     canvas.drawRect(
-      Rect.fromLTWH(left + width * 0.3, eyeY, eyeSize, eyeSize),
-      Paint()..color = eyeColor,
+      Rect.fromLTWH(headX, headY, headW, headH),
+      Paint()..color = headColor,
+    );
+
+    // Eyes - glowing
+    final eyeGlow = z.type == 'runner'
+        ? Color.fromARGB(255, (255 * fog).round().clamp(0, 255), (240 * fog).round().clamp(0, 255), 0)
+        : Color.fromARGB(255, (255 * fog).round().clamp(0, 255), (40 * fog).round().clamp(0, 255), 0);
+    final eyeSize = max(2.0, width * 0.10);
+    final eyeY = headY + headH * 0.35;
+    // Eye glow aura
+    if (fog > 0.3) {
+      final glowPaint = Paint()
+        ..color = eyeGlow.withAlpha((60 * fog).round().clamp(0, 255))
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+      canvas.drawCircle(Offset(headX + headW * 0.3, eyeY + eyeSize / 2), eyeSize * 1.5, glowPaint);
+      canvas.drawCircle(Offset(headX + headW * 0.7, eyeY + eyeSize / 2), eyeSize * 1.5, glowPaint);
+    }
+    canvas.drawRect(
+      Rect.fromLTWH(headX + headW * 0.2, eyeY, eyeSize, eyeSize),
+      Paint()..color = eyeGlow,
     );
     canvas.drawRect(
-      Rect.fromLTWH(left + width * 0.55, eyeY, eyeSize, eyeSize),
-      Paint()..color = eyeColor,
+      Rect.fromLTWH(headX + headW * 0.6, eyeY, eyeSize, eyeSize),
+      Paint()..color = eyeGlow,
     );
+
+    // Mouth (dark slash)
+    canvas.drawRect(
+      Rect.fromLTWH(headX + headW * 0.25, headY + headH * 0.7, headW * 0.5, max(1, headH * 0.1)),
+      Paint()..color = Color.fromARGB((180 * fog).round().clamp(0, 255), 20, 0, 0),
+    );
+
+    // Brute: extra bulk outline
+    if (z.type == 'brute') {
+      canvas.drawRect(
+        Rect.fromLTWH(torsoX - 2, torsoY - 1, torsoW + 4, torsoH + 2),
+        Paint()
+          ..color = color.withAlpha((60 * fog).round().clamp(0, 255))
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
+    }
 
     // Health bar (if damaged)
     if (z.alive && z.health < z.maxHealth) {
-      final barW = width * 0.8;
-      final barH = max(2.0, height * 0.03);
+      final barW = width * 0.7;
+      final barH = max(3.0, height * 0.035);
       final barLeft = left + (width - barW) / 2;
-      final barTop = top - barH - 2;
+      final barTop = top - barH - 4;
+      // Background
+      canvas.drawRect(
+        Rect.fromLTWH(barLeft - 1, barTop - 1, barW + 2, barH + 2),
+        Paint()..color = const Color(0xAA000000),
+      );
       canvas.drawRect(
         Rect.fromLTWH(barLeft, barTop, barW, barH),
         Paint()..color = const Color(0xFF333333),
       );
       final ratio = z.health / z.maxHealth;
+      final hpColor = ratio > 0.5
+          ? const Color(0xFFCC0000)
+          : const Color(0xFFFF4500);
       canvas.drawRect(
         Rect.fromLTWH(barLeft, barTop, barW * ratio, barH),
-        Paint()..color = ratio > 0.5 ? const Color(0xFFFF0000) : const Color(0xFFFF4500),
+        Paint()..color = hpColor,
       );
     }
   }
 
+  Color _darken(Color c, double factor) {
+    return Color.fromARGB(c.alpha,
+      (c.red * factor).round().clamp(0, 255),
+      (c.green * factor).round().clamp(0, 255),
+      (c.blue * factor).round().clamp(0, 255),
+    );
+  }
+
+  Color _lighten(Color c, double factor) {
+    return Color.fromARGB(c.alpha,
+      (c.red * factor).round().clamp(0, 255),
+      (c.green * factor).round().clamp(0, 255),
+      (c.blue * factor).round().clamp(0, 255),
+    );
+  }
+
   void _drawItemSprite(Canvas canvas, double left, double top, double width,
-      double height, Color color, String type, double fog) {
-    // Main body
+      double height, Color color, _SpriteInfo sprite, double fog) {
+
+    // Shadow
+    final shadowY = top + height;
+    canvas.drawOval(
+      Rect.fromCenter(
+        center: Offset(left + width / 2, shadowY),
+        width: width * 0.5,
+        height: width * 0.15,
+      ),
+      Paint()..color = Color.fromARGB((25 * fog).round().clamp(0, 255), 0, 0, 0),
+    );
+
+    // Main body with rounded appearance (two layers)
+    final bodyRect = Rect.fromLTWH(
+      left + width * 0.1, top + height * 0.1,
+      width * 0.8, height * 0.8);
+    canvas.drawRect(bodyRect, Paint()..color = _darken(color, 0.6));
     canvas.drawRect(
-      Rect.fromLTWH(left + width * 0.1, top + height * 0.1,
-          width * 0.8, height * 0.8),
+      Rect.fromLTWH(
+        left + width * 0.15, top + height * 0.12,
+        width * 0.7, height * 0.76),
       Paint()..color = color,
     );
 
     // Glow effect for special items
-    if (type == 'mysterybox' || type == 'packapunch' || type == 'perk') {
-      final glowAlpha = (sin(DateTime.now().millisecondsSinceEpoch * 0.004) * 30 + 50)
-          .round().clamp(0, 255);
+    if (sprite.type == 'mysterybox' || sprite.type == 'packapunch' || sprite.type == 'perk') {
+      final pulseAlpha = (sin(_time * 4) * 25 + 45).round().clamp(0, 255);
       canvas.drawRect(
         Rect.fromLTWH(left + width * 0.05, top + height * 0.05,
             width * 0.9, height * 0.9),
         Paint()
-          ..color = color.withAlpha(glowAlpha)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2,
-      );
-    }
-  }
-
-  void _renderWeaponView(Canvas canvas, Size size, GameWeapon weapon,
-      double weaponBob, double muzzleFlashTimer) {
-    final weaponColor = Color(weapon.color);
-    final centerX = size.width / 2;
-    final bottomY = size.height;
-
-    // Weapon bob from walking
-    final bobX = sin(weaponBob) * 8;
-    final bobY = cos(weaponBob * 2) * 4;
-
-    // Gun body
-    final gunW = 80.0;
-    final gunH = 50.0;
-    final gunX = centerX - gunW / 2 + bobX + 30;
-    final gunY = bottomY - gunH - 20 + bobY;
-
-    // Gun body (main rectangle)
-    canvas.drawRect(
-      Rect.fromLTWH(gunX, gunY, gunW, gunH),
-      Paint()..color = weaponColor.withAlpha(220),
-    );
-
-    // Gun barrel
-    canvas.drawRect(
-      Rect.fromLTWH(gunX + gunW * 0.3, gunY - 25, gunW * 0.15, 30),
-      Paint()..color = weaponColor,
-    );
-
-    // Handle
-    canvas.drawRect(
-      Rect.fromLTWH(gunX + gunW * 0.35, gunY + gunH, gunW * 0.3, 25),
-      Paint()..color = const Color(0xFF333333),
-    );
-
-    // Pack-a-Punch glow
-    if (weapon.isPaP) {
-      canvas.drawRect(
-        Rect.fromLTWH(gunX - 3, gunY - 28, gunW + 6, gunH + 58),
-        Paint()
-          ..color = weaponColor.withAlpha(80)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 12),
+          ..color = color.withAlpha(pulseAlpha)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 8),
       );
     }
 
-    // Muzzle flash
-    if (muzzleFlashTimer > 0) {
-      final flashSize = 30.0 + muzzleFlashTimer * 50;
-      final flashX = gunX + gunW * 0.35;
-      final flashY = gunY - 25 - flashSize / 2;
-      canvas.drawRect(
-        Rect.fromLTWH(flashX, flashY, flashSize * 0.5, flashSize),
-        Paint()..color = Color.fromARGB(
-          (muzzleFlashTimer * 3 * 255).round().clamp(0, 255),
-          255, 255, 100,
-        ),
-      );
-    }
-
-    // Reloading indicator
-    if (weapon.reloading) {
+    // Label text on the sprite
+    if (sprite.label != null && height > 20) {
+      final textSize = max(8.0, min(height * 0.25, 24.0));
       final textPainter = TextPainter(
-        text: const TextSpan(
-          text: 'RELOADING...',
+        text: TextSpan(
+          text: sprite.label!,
           style: TextStyle(
-            color: Color(0xFFFFFF00),
-            fontSize: 16,
+            color: const Color(0xFFFFFFFF),
+            fontSize: textSize,
             fontWeight: FontWeight.bold,
             fontFamily: 'Courier',
           ),
@@ -577,18 +731,166 @@ class Raycaster {
         textDirection: TextDirection.ltr,
       )..layout();
       textPainter.paint(canvas, Offset(
-        centerX - textPainter.width / 2,
-        gunY - 45,
+        left + (width - textPainter.width) / 2,
+        top + (height - textPainter.height) / 2,
       ));
+    }
+  }
+
+  void _renderWeaponView(Canvas canvas, Size size, GameWeapon weapon,
+      double weaponBob, double muzzleFlashTimer, PlayerState player) {
+    final weaponColor = Color(weapon.color);
+    final centerX = size.width / 2;
+    final bottomY = size.height;
+
+    // Realistic weapon bob from walking
+    final bobX = sin(weaponBob) * 6;
+    final bobY = cos(weaponBob * 2).abs() * 3;
+
+    // Idle sway (subtle)
+    final swayX = sin(_time * 1.2) * 1.5;
+    final swayY = cos(_time * 0.8) * 1.0;
+
+    final totalBobX = bobX + swayX;
+    final totalBobY = bobY + swayY;
+
+    // Recoil kick
+    final recoilY = muzzleFlashTimer > 0 ? -12.0 * (muzzleFlashTimer / 0.08) : 0.0;
+    final recoilAngle = muzzleFlashTimer > 0 ? -0.05 * (muzzleFlashTimer / 0.08) : 0.0;
+
+    // Reload animation - weapon drops down
+    double reloadDrop = 0;
+    if (weapon.reloading) {
+      final reloadProgress = 1.0 - (weapon.reloadTimer / weapon.stats.reloadTime);
+      // Drop down, pause, come back up
+      if (reloadProgress < 0.3) {
+        reloadDrop = reloadProgress / 0.3 * 80;
+      } else if (reloadProgress < 0.7) {
+        reloadDrop = 80;
+      } else {
+        reloadDrop = (1.0 - (reloadProgress - 0.7) / 0.3) * 80;
+      }
+    }
+
+    canvas.save();
+    canvas.translate(centerX + 50 + totalBobX, bottomY - 100 + totalBobY + recoilY + reloadDrop);
+    if (recoilAngle != 0) {
+      canvas.rotate(recoilAngle);
+    }
+
+    // Draw weapon based on type feel
+    _drawWeaponModel(canvas, weapon, weaponColor);
+
+    canvas.restore();
+
+    // Muzzle flash - drawn at barrel tip
+    if (muzzleFlashTimer > 0) {
+      final flashAlpha = (muzzleFlashTimer / 0.08 * 255).round().clamp(0, 255);
+      final flashCX = centerX + 50 + totalBobX + 8;
+      final flashCY = bottomY - 100 + totalBobY + recoilY + reloadDrop - 50;
+
+      // Bright flash circle
+      canvas.drawCircle(
+        Offset(flashCX, flashCY),
+        18 + muzzleFlashTimer * 60,
+        Paint()
+          ..color = Color.fromARGB(flashAlpha, 255, 240, 120)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12),
+      );
+      // Core white
+      canvas.drawCircle(
+        Offset(flashCX, flashCY),
+        8,
+        Paint()..color = Color.fromARGB(flashAlpha, 255, 255, 255),
+      );
+      // Screen flash
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, size.width, size.height),
+        Paint()..color = Color.fromARGB((flashAlpha * 0.05).round().clamp(0, 255), 255, 200, 100),
+      );
+    }
+  }
+
+  void _drawWeaponModel(Canvas canvas, GameWeapon weapon, Color weaponColor) {
+    final darkColor = _darken(weaponColor, 0.6);
+    final highlightColor = _lighten(weaponColor, 1.3);
+
+    // Barrel
+    final barrelW = 12.0;
+    final barrelH = 55.0;
+    canvas.drawRect(
+      Rect.fromLTWH(-barrelW / 2, -barrelH, barrelW, barrelH),
+      Paint()..color = darkColor,
+    );
+    // Barrel highlight edge
+    canvas.drawRect(
+      Rect.fromLTWH(-barrelW / 2, -barrelH, 2, barrelH),
+      Paint()..color = highlightColor.withAlpha(60),
+    );
+
+    // Receiver/body
+    final bodyW = 50.0;
+    final bodyH = 28.0;
+    canvas.drawRect(
+      Rect.fromLTWH(-bodyW / 2, 0, bodyW, bodyH),
+      Paint()..color = weaponColor,
+    );
+    // Body top highlight
+    canvas.drawRect(
+      Rect.fromLTWH(-bodyW / 2, 0, bodyW, 2),
+      Paint()..color = highlightColor.withAlpha(40),
+    );
+    // Body side shadow
+    canvas.drawRect(
+      Rect.fromLTWH(bodyW / 2 - 3, 0, 3, bodyH),
+      Paint()..color = darkColor,
+    );
+
+    // Trigger guard area
+    canvas.drawRect(
+      Rect.fromLTWH(-8, bodyH, 16, 8),
+      Paint()..color = darkColor,
+    );
+
+    // Grip/handle
+    final gripW = 16.0;
+    final gripH = 35.0;
+    canvas.drawRect(
+      Rect.fromLTWH(-gripW / 2, bodyH + 5, gripW, gripH),
+      Paint()..color = const Color(0xFF2A2420),
+    );
+    // Grip texture lines
+    for (int i = 0; i < 4; i++) {
+      canvas.drawRect(
+        Rect.fromLTWH(-gripW / 2, bodyH + 12 + i * 7.0, gripW, 1),
+        Paint()..color = const Color(0xFF1A1614),
+      );
+    }
+
+    // Magazine (below receiver)
+    canvas.drawRect(
+      Rect.fromLTWH(-12, bodyH + 2, 10, 20),
+      Paint()..color = const Color(0xFF333333),
+    );
+
+    // Pack-a-Punch glow
+    if (weapon.isPaP) {
+      canvas.drawRect(
+        Rect.fromLTWH(-bodyW / 2 - 5, -barrelH - 5, bodyW + 10, barrelH + bodyH + gripH + 15),
+        Paint()
+          ..color = weaponColor.withAlpha(50)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.outer, 15),
+      );
     }
   }
 }
 
 class _RayResult {
   final double distance;
-  final int side; // 0 = vertical wall hit (E/W), 1 = horizontal wall hit (N/S)
+  final int side;
   final int cellType;
   final int mapX, mapY;
+  final double? wallU; // texture coordinate along the wall surface
 
   _RayResult({
     required this.distance,
@@ -596,6 +898,7 @@ class _RayResult {
     required this.cellType,
     required this.mapX,
     required this.mapY,
+    this.wallU,
   });
 }
 
@@ -605,6 +908,7 @@ class _SpriteInfo {
   final String type;
   final Object? data;
   final double sizeMultiplier;
+  final String? label;
 
   _SpriteInfo({
     required this.x,
@@ -614,5 +918,6 @@ class _SpriteInfo {
     required this.type,
     this.data,
     this.sizeMultiplier = 1.0,
+    this.label,
   });
 }

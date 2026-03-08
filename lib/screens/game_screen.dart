@@ -61,6 +61,22 @@ class _GameScreenState extends State<GameScreen> {
             onPointerMove: (event) {
               _game.updateMouseDelta(event.delta.dx);
             },
+            onPointerDown: (event) {
+              // Primary button (left click) = fire
+              if (event.buttons & 0x01 != 0) {
+                _game.setFiring(true);
+              }
+              // Secondary button (right click) = knife
+              if (event.buttons & 0x02 != 0) {
+                _game.onKnife();
+              }
+            },
+            onPointerUp: (event) {
+              _game.setFiring(false);
+            },
+            onPointerCancel: (event) {
+              _game.setFiring(false);
+            },
             child: GameWidget(game: _game),
           ),
           // Mobile controls overlay

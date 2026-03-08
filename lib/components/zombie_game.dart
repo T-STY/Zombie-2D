@@ -9,8 +9,7 @@ import '../models/map_data.dart';
 import '../models/weapon_data.dart';
 import 'raycaster.dart';
 
-class ZombieGame extends FlameGame
-    with KeyboardEvents, TapDetector, SecondaryTapDetector {
+class ZombieGame extends FlameGame with KeyboardEvents {
   final String mapKey;
   final void Function(int round, int kills, int points) onGameOver;
 
@@ -31,7 +30,12 @@ class ZombieGame extends FlameGame
   bool _firing = false;
   bool _mobileFiring = false;
   double _mobileMoveDx = 0, _mobileMoveDy = 0;
-  double _mouseSensitivity = 0.003;
+  double _mouseSensitivity = 0.0045;
+
+  // Movement feel
+  double _velocityX = 0, _velocityY = 0;
+  static const double _acceleration = 12.0;
+  static const double _friction = 8.0;
 
   // Screen shake
   double _shakeX = 0, _shakeY = 0;
@@ -126,6 +130,10 @@ class ZombieGame extends FlameGame
     _tryKnife();
   }
 
+  void setFiring(bool firing) {
+    _firing = firing;
+  }
+
   void updateMouseDelta(double dx) {
     if (!_player.alive) return;
     _player.angle += dx * _mouseSensitivity;
@@ -157,21 +165,6 @@ class ZombieGame extends FlameGame
     }
 
     return KeyEventResult.handled;
-  }
-
-  @override
-  void onTapDown(TapDownInfo info) {
-    _firing = true;
-  }
-
-  @override
-  void onTapUp(TapUpInfo info) {
-    _firing = false;
-  }
-
-  @override
-  void onSecondaryTapDown(TapDownInfo info) {
-    _tryKnife();
   }
 
   // ---- Collision helpers ----
@@ -543,43 +536,40 @@ class ZombieGame extends FlameGame
 
   void _updatePlayer(double dt) {
     // FPS-style movement: forward/back/strafe relative to facing angle
-    double forward = 0, strafe = 0;
+    double inputForward = 0, inputStrafe = 0;
     if (_keysPressed.contains(LogicalKeyboardKey.keyW) ||
         _keysPressed.contains(LogicalKeyboardKey.arrowUp)) {
-      forward += 1;
+      inputForward += 1;
     }
     if (_keysPressed.contains(LogicalKeyboardKey.keyS) ||
         _keysPressed.contains(LogicalKeyboardKey.arrowDown)) {
-      forward -= 1;
+      inputForward -= 1;
     }
     if (_keysPressed.contains(LogicalKeyboardKey.keyA) ||
         _keysPressed.contains(LogicalKeyboardKey.arrowLeft)) {
-      strafe -= 1;
+      inputStrafe -= 1;
     }
     if (_keysPressed.contains(LogicalKeyboardKey.keyD) ||
         _keysPressed.contains(LogicalKeyboardKey.arrowRight)) {
-      strafe += 1;
+      inputStrafe += 1;
     }
 
     // Mobile input: joystick Y = forward/back, joystick X = strafe
     if (_mobileMoveDx != 0 || _mobileMoveDy != 0) {
-      forward = -_mobileMoveDy; // up on joystick = forward
-      strafe = _mobileMoveDx;
+      inputForward = -_mobileMoveDy;
+      inputStrafe = _mobileMoveDx;
     }
 
     // Normalize diagonal
-    if (forward != 0 && strafe != 0) {
-      final len = sqrt(forward * forward + strafe * strafe);
-      forward /= len;
-      strafe /= len;
+    if (inputForward != 0 && inputStrafe != 0) {
+      final len = sqrt(inputForward * inputForward + inputStrafe * inputStrafe);
+      inputForward /= len;
+      inputStrafe /= len;
     }
 
-    // Convert to world movement using player angle
-    final moveX = cos(_player.angle) * forward + cos(_player.angle + pi / 2) * strafe;
-    final moveY = sin(_player.angle) * forward + sin(_player.angle + pi / 2) * strafe;
-
-    _player.moveX = moveX;
-    _player.moveY = moveY;
+    // Convert input to world-space target velocity
+    final targetMoveX = cos(_player.angle) * inputForward + cos(_player.angle + pi / 2) * inputStrafe;
+    final targetMoveY = sin(_player.angle) * inputForward + sin(_player.angle + pi / 2) * inputStrafe;
 
     double spd = _player.speed;
     if (_player.perks.contains('staminup')) spd *= 1.3;
@@ -588,8 +578,26 @@ class ZombieGame extends FlameGame
       _player.currentWeapon.reloadTimer -= dt * 0.5;
     }
 
-    double newX = _player.x + moveX * spd * dt * 60;
-    double newY = _player.y + moveY * spd * dt * 60;
+    final targetVX = targetMoveX * spd;
+    final targetVY = targetMoveY * spd;
+
+    // Smooth acceleration/deceleration (momentum)
+    final hasInput = inputForward != 0 || inputStrafe != 0;
+    final lerpRate = hasInput ? _acceleration : _friction;
+    _velocityX += (targetVX - _velocityX) * min(1.0, lerpRate * dt);
+    _velocityY += (targetVY - _velocityY) * min(1.0, lerpRate * dt);
+
+    // Kill very small velocities to avoid drifting
+    if (_velocityX.abs() < 0.01 && _velocityY.abs() < 0.01) {
+      _velocityX = 0;
+      _velocityY = 0;
+    }
+
+    _player.moveX = _velocityX / max(spd, 0.01);
+    _player.moveY = _velocityY / max(spd, 0.01);
+
+    double newX = _player.x + _velocityX * dt * 60;
+    double newY = _player.y + _velocityY * dt * 60;
 
     final walls = _getActiveWalls();
     bool blockedX = false, blockedY = false;
@@ -603,8 +611,16 @@ class ZombieGame extends FlameGame
         blockedY = true;
       }
     }
-    if (!blockedX) _player.x = newX;
-    if (!blockedY) _player.y = newY;
+    if (!blockedX) {
+      _player.x = newX;
+    } else {
+      _velocityX = 0; // Stop momentum on wall hit
+    }
+    if (!blockedY) {
+      _player.y = newY;
+    } else {
+      _velocityY = 0;
+    }
 
     _player.currentWeapon.update(dt);
     if (_player.knifeTimer > 0) _player.knifeTimer -= dt;
@@ -621,11 +637,13 @@ class ZombieGame extends FlameGame
       _player.damageOverlayAlpha -= dt * 0.5;
     }
 
-    // Weapon bob when moving
-    if (moveX != 0 || moveY != 0) {
-      _weaponBob += dt * 8;
+    // Weapon bob when moving - tied to actual velocity for realism
+    final moveSpeed = sqrt(_velocityX * _velocityX + _velocityY * _velocityY);
+    if (moveSpeed > 0.3) {
+      _weaponBob += dt * moveSpeed * 2.5;
     } else {
-      _weaponBob *= 0.9;
+      // Gentle idle sway
+      _weaponBob += dt * 0.5;
     }
 
     // Muzzle flash decay
